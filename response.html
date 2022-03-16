@@ -1,0 +1,8 @@
+{{ range . }}
+<div class="album-list-item">
+    <h3>{{ .Name }}</h3>
+    <p>{{ .ArtistsName }}</p>
+    <a href="{{ .Fullsize }}">
+        <img loading="lazy" src="{{ .Small }}">
+    </a>
+</div> {{ end }}
