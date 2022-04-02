@@ -24,14 +24,18 @@ import (
 
 var (
 	//go:embed response.html
-	TemplateFile     string
-	BaseURL          *url.URL
-	ApiURL           *url.URL
-	ResponseTemplate = template.Must(template.New("Response").Parse(TemplateFile))
-	AuthClient       *http.Client
-	SupportEmail     string
-	StatusPage       string
-	SockPath         string
+	ResponseTemplateFile string
+	ResponseTemplate     = template.Must(template.New("Response").Parse(ResponseTemplateFile))
+	//go:embed error.html
+	ErrorTemplateFile string
+	ErrorTemplate     = template.Must(template.New("Error").Parse(ErrorTemplateFile))
+
+	BaseURL      *url.URL
+	ApiURL       *url.URL
+	AuthClient   *http.Client
+	SupportEmail string
+	StatusPage   string
+	SockPath     string
 )
 
 // The JSON response structure.
@@ -147,14 +151,16 @@ func main() {
 	log.Printf("caught signal %s: shutting down.", sig)
 }
 
-// TODO(ayman): make this a template
 func ErrorResponse(w io.Writer) {
-	_, _ = fmt.Fprintf(w, `<div class="album-error">
-<h2>There was an internal error. Please refresh the page and try again.</h2>
-<p>If the problem persists, contact <a href="mailto:%s">%s</a></p>
-<p>Status: <a href="%s">%s</a></p>
-</div>`,
-		SupportEmail, SupportEmail, StatusPage, StatusPage)
+	err := struct {
+		SupportEmail string
+		StatusPage   string
+	}{
+		SupportEmail: SupportEmail,
+		StatusPage:   StatusPage,
+	}
+
+	_ = ErrorTemplate.Execute(w, err)
 }
 
 func handleSearch(w http.ResponseWriter, r *http.Request) {
