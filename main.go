@@ -147,6 +147,7 @@ func main() {
 	log.Printf("caught signal %s: shutting down.", sig)
 }
 
+// TODO(ayman): make this a template
 func ErrorResponse(w io.Writer) {
 	_, _ = fmt.Fprintf(w, `<div class="album-error">
 <h2>There was an internal error. Please refresh the page and try again.</h2>

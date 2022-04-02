@@ -25,7 +25,7 @@ Rate Limiting
 Since this API is only meant to be accessed from the web frontend and not as a
 general purpose "Album Art API", it's wise to use your web server of choice to
 put a rate limit in front of this server. Specifically, the `web-client` will
-never access this API more than 10 times every second.
+never access this API more than 20 times every second.
 
 Configuration
 -------------
