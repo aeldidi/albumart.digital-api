@@ -1,236 +1,160 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
-	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
-	"net/http/fcgi"
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"albumart.digital/auth"
-	_ "albumart.digital/dotenv"
+	"albumart.digital/applemusic"
+	"albumart.digital/config"
+	"albumart.digital/dotenv"
+	"albumart.digital/jsonlog"
 )
 
 var (
-	//go:embed response.html
-	ResponseTemplateFile string
-	ResponseTemplate     = template.Must(template.New("Response").Parse(ResponseTemplateFile))
-	//go:embed error.html
-	ErrorTemplateFile string
-	ErrorTemplate     = template.Must(template.New("Error").Parse(ErrorTemplateFile))
-
-	BaseURL      *url.URL
-	ApiURL       *url.URL
-	AuthClient   *http.Client
+	ApiPath      string
+	ApiPort      string
+	ConfigPath   string
+	ConfigPort   string
 	SupportEmail string
 	StatusPage   string
-	SockPath     string
+	Port         string
 )
 
-// The JSON response structure.
-
-type Artwork struct {
-	Height int64  `json:"height"`
-	Width  int64  `json:"width"`
-	Url    string `json:"url"`
-}
-
-type AlbumAttribute struct {
-	ArtistName string  `json:"artistName"`
-	Artwork    Artwork `json:"artwork"`
-	Name       string  `json:"name"`
-}
-
-type Album struct {
-	Attributes AlbumAttribute `json:"attributes"`
-}
-
-type AlbumSearchResult struct {
-	Data []Album `json:"data"`
-}
-
-type SearchResults struct {
-	Albums AlbumSearchResult `json:"albums"`
-}
-
-type APIResponse struct {
-	Results SearchResults `json:"results"`
-}
-
-func ensureSet(vals ...string) {
-	for _, v := range vals {
-		if _, found := os.LookupEnv(v); !found {
-			log.Fatalf("'%v' not set in .env or environment", v)
-		}
-	}
-}
-
 func init() {
-	ensureSet(
-		"BASE_URL",
-		"APPLE_MUSIC_KEY_ID",
-		"APPLE_TEAM_ID",
-		"APPLE_PRIVATE_KEY_PATH",
-		"SUPPORT_EMAIL",
-		"STATUS_PAGE",
-		"SOCKET_PATH",
+	dotenv.EnsureSet(
+		"API_PATH",
+		"CONFIG_PATH",
+		"API_PORT",
+		"CONFIG_PORT",
 	)
 
-	var err error
-
-	BaseURL, err = url.Parse(os.Getenv("BASE_URL"))
-	if err != nil {
-		log.Fatalf("couldn't parse base url: %v", err)
-	}
-
-	ApiURL, err = url.Parse("https://api.music.apple.com/v1/catalog/us/search")
-	if err != nil {
-		log.Fatalf("couldn't parse API url: err")
-	}
-
-	f, err := os.Open(os.Getenv("APPLE_PRIVATE_KEY_PATH"))
-	if err != nil {
-		log.Fatalf("couldn't read private key '%v': %v",
-			os.Getenv("APPLE_PRIVATE_KEY_PATH"), err)
-	}
-	defer f.Close()
-
-	pkey, err := auth.LoadPrivateKey(f)
-	if err != nil {
-		log.Fatalf("couldn't load private key '%v': %v", f.Name(), err)
-	}
-
-	AuthClient = &http.Client{
-		Transport: &auth.Transport{
-			PrivateKey: pkey,
-			KeyId:      os.Getenv("APPLE_MUSIC_KEY_ID"),
-			TeamID:     os.Getenv("APPLE_TEAM_ID"),
-		},
-		Timeout: 5 * time.Second,
-	}
-
+	ApiPath = os.Getenv("API_PATH")
+	ConfigPath = os.Getenv("CONFIG_PATH")
 	SupportEmail = os.Getenv("SUPPORT_EMAIL")
 	StatusPage = os.Getenv("STATUS_PAGE")
-	SockPath = os.Getenv("SOCKET_PATH")
+	ApiPort = os.Getenv("API_PORT")
+	ConfigPort = os.Getenv("CONFIG_PORT")
+
+	log.SetFlags(0)
+	// log in JSON format to stdout
+	log.SetOutput(&jsonlog.Filter{
+		Levels: []string{"DEBUG", "INFO", "ERROR"},
+		Level:  "INFO",
+		Writer: os.Stdout,
+	})
 }
 
 func main() {
-	http.HandleFunc(BaseURL.Path, handleSearch)
+	http.HandleFunc(ApiPath, handleSearch)
 
-	l, err := net.Listen("unix", SockPath)
+	// Config Endpoint
+	go http.ListenAndServe(
+		fmt.Sprintf(":%s", ConfigPort),
+		&config.Handler{},
+	)
+
+	l, err := net.Listen("tcp", fmt.Sprintf(":%s", ApiPort))
 	if err != nil {
-		log.Fatalf("couldn't open '%v': %v", SockPath, err)
+		log.Fatalf("ERROR couldn't listen on port %s: %v", Port, err)
 	}
 	defer l.Close()
 
-	if err := os.Chmod(SockPath, 0666); err != nil {
-		log.Fatalf("couldn't set proper permissions for '%v'", SockPath)
-	}
-
 	// Start the server
 	go func() {
-		log.Printf("listening at %v...", BaseURL)
-		log.Fatalf("fcgi.Serve returned with: %v", fcgi.Serve(l, nil))
+		log.Printf("INFO listening at %v...", ApiPath)
+		log.Fatalf("ERROR http.Serve returned with: %v", http.Serve(l, nil))
 	}()
 
-	// Handle common process-killing signals so we can gracefully shut down:
+	// Handle common process-killing signals so we can gracefully shut down
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigc
-	log.Printf("caught signal %s: shutting down.", sig)
+	log.Printf("INFO caught signal %s: shutting down.", sig)
 }
 
-func ErrorResponse(w io.Writer) {
-	err := struct {
-		SupportEmail string
-		StatusPage   string
-	}{
-		SupportEmail: SupportEmail,
-		StatusPage:   StatusPage,
-	}
+func ErrorResponse(w http.ResponseWriter, r *http.Request, code int, message string, log_level string, log_msg string) {
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(struct {
+		Message string `json:"message"`
+	}{message})
 
-	_ = ErrorTemplate.Execute(w, err)
+	jsonlog.Level(log_level).
+		Field("address", r.RemoteAddr).
+		Field("status", code).
+		Msg(log_msg)
 }
 
 func handleSearch(w http.ResponseWriter, r *http.Request) {
-	log.Printf("recieved request from '%v'", r.RemoteAddr)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	startTime := time.Now()
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(struct {
+			Message string `json:"message"`
+		}{"Only the GET method is supported on this endpoint"})
 
-	u := *ApiURL
-	q := url.Values{
-		"term":  r.URL.Query()["q"],
-		"types": []string{"albums"},
-		"limit": []string{"25"},
-		"with":  []string{"topResults"},
-	}
-	u.RawQuery = q.Encode()
-	resp, err := AuthClient.Get(u.String())
-	if err != nil {
-		ErrorResponse(w)
-		log.Print("couldn't get from the API")
+		jsonlog.Level("INFO").
+			Field("address", r.RemoteAddr).
+			Field("status", http.StatusMethodNotAllowed).
+			Field("method", r.Method).
+			Msg("invalid method")
 		return
 	}
 
-	searchResponse := APIResponse{}
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		ErrorResponse(w)
-		log.Printf("couldn't read response body: %v", err)
+	jsonlog.Level("DEBUG").
+		Field("address", r.RemoteAddr).
+		Field("query", url.QueryEscape(r.URL.Query().Get("q"))).
+		Msg("started processing request")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+
+	var err error
+
+	if _, ok := r.URL.Query()["q"]; !ok {
+		ErrorResponse(
+			w,
+			r,
+			http.StatusBadRequest,
+			"The request was missing the query parameter 'q'",
+			"INFO",
+			"request missing 'q' parameter",
+		)
 		return
 	}
 
-	err = json.Unmarshal(body, &searchResponse)
+	albums, err := applemusic.SearchAlbum(r.URL.Query().Get("q"))
 	if err != nil {
-		ErrorResponse(w)
-		log.Print("API returned invalid JSON")
+		ErrorResponse(
+			w,
+			r,
+			http.StatusInternalServerError,
+			"The server couldn't complete the request",
+			"ERROR",
+			fmt.Sprintf("GET request to API failed: %v", err),
+		)
 		return
 	}
 
-	err = ResponseTemplate.Execute(w, searchResponse.Results.Albums.Data)
-	if err != nil {
-		if strings.HasSuffix(err.Error(), "use of closed network connection") {
-			log.Printf("connection from %v closed", r.RemoteAddr)
-			return
-		}
+	jsonlog.Level("DEBUG").
+		Field("parsed-api-response", albums).
+		Msg("parsed API response")
 
-		log.Printf("at template: %v", err)
+	err = json.NewEncoder(w).Encode(albums)
+	if err != nil {
+		log.Printf("INFO couldn't write response to client: %v", err)
 		return
 	}
-}
 
-func (a Album) Name() string {
-	return a.Attributes.Name
-}
-
-func (a Album) Small() string {
-	smallReplacer := strings.NewReplacer(
-		"{w}", "500",
-		"{h}", "500",
-	)
-
-	return smallReplacer.Replace(a.Attributes.Artwork.Url)
-}
-
-func (a Album) Fullsize() string {
-	fullsizeReplacer := strings.NewReplacer(
-		"{w}", fmt.Sprint(a.Attributes.Artwork.Width),
-		"{h}", fmt.Sprint(a.Attributes.Artwork.Height),
-	)
-
-	return fullsizeReplacer.Replace(a.Attributes.Artwork.Url)
-}
-
-func (a Album) ArtistsName() string {
-	return a.Attributes.ArtistName
+	jsonlog.Level("INFO").
+		Field("query", url.QueryEscape(r.URL.Query().Get("q"))).
+		Field("status", http.StatusOK).
+		Field("address", r.RemoteAddr).
+		Field("response-time-ms", time.Since(startTime).Milliseconds()).
+		Send()
 }
