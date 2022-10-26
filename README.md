@@ -30,5 +30,5 @@ helpful when diagnosing and fixing bugs.
 License
 -------
 
-Everything in this repo is in the public domain. See `LICENSE` for more
-information.
+The code is licensed as 0BSD, meaning everything in this repo can be used for
+any purpose without needing to give credit. See `LICENSE` for more information.
